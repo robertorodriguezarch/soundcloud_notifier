@@ -21,7 +21,11 @@ load_dotenv(BASE_DIR / ".env")
 
 SEEN_FILE = BASE_DIR / "seen_soundcloud_tracks.json"
 
-SEARCH_QUERY = os.getenv("SOUNDCLOUD_SEARCH_QUERY", "babystaydown")
+SEARCH_QUERIES = [
+    query.strip()
+    for query in os.getenv("SOUNDCLOUD_SEARCH_QUERIES", "babystaydown").split(",")
+    if query.strip()
+]
 CREATED_AT_FILTER = os.getenv("SOUNDCLOUD_CREATED_AT_FILTER", "last_hour")
 SOUNDCLOUD_CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
 SOUNDCLOUD_LIMIT = int(os.getenv("SOUNDCLOUD_LIMIT", 20))
@@ -123,7 +127,7 @@ def format_soundcloud_time(created_at: str) -> str:
         return created_at
 
 
-def send_discord_alert(track: dict[str, str]) -> None:
+def send_discord_alert(query: str, track: dict[str, str]) -> None:
     if not DISCORD_WEBHOOK_URL:
         raise RuntimeError("Missing DISCORD_WEBHOOK_URL in .env")
 
@@ -133,10 +137,10 @@ def send_discord_alert(track: dict[str, str]) -> None:
     payload = {
         "username": "SoundCloud Notifier",
         "content": (
-            f"New SoundCloud result for `{SEARCH_QUERY}`:\n"
-            f"***{track['title']}**\n"
-            f"Uploader: {username}\n"
-            f"Created: {created_at}\n"
+            f"New SoundCloud result for `{query}`:\n"
+            f"**{track['title']}**\n"
+            f"Uploader:\n{username}\n"
+            f"Created:\n{created_at}\n"
             f"{track['url']}"
         ),
     }
@@ -148,7 +152,7 @@ def send_discord_alert(track: dict[str, str]) -> None:
 def main() -> None:
     print(
         f"Config loaded: "
-        f"SOUNDCLOUD_SEARCH_QUERY={SEARCH_QUERY}, "
+        f"SOUNDCLOUD_SEARCH_QUERY={SEARCH_QUERIES}, "
         f"SOUNDCLOUD_CREATED_AT_FILTER={CREATED_AT_FILTER}, "
         f"SOUNDCLOUD_LIMIT={SOUNDCLOUD_LIMIT}, "
         f"SOUNDCLOUD_CLIENT_ID_LOADED={bool(SOUNDCLOUD_CLIENT_ID)}"
@@ -157,33 +161,33 @@ def main() -> None:
         raise RuntimeError("Missing DISCORD_WEBHOOK_URL in .env")
 
     seen = load_seen_tracks()
-    results = search_soundcloud(SEARCH_QUERY)
+    total_new_count = 0
 
-    print(f"Found {len(results)} matching results before seen-filtering.")
+    for query in SEARCH_QUERIES:
+        results = search_soundcloud(query)
 
-    if not results:
-        print("No matching SoundCloud results found.")
-        return
+        print(
+            f"Found {len(results)} matching results before seen-filtering for query `{query}`."
+        )
 
-    new_count = 0
-
-    # Oldest-first-ish based on page order reversed.
-    # We  can refine ordering later once we inspect actual results.
-    for track in reversed(results):
-        track_id = track["url"]
-
-        if track_id in seen:
-            print(f"Already seen, skipping: {track['title']} - {track['url']}")
+        if not results:
+            print(f"No matching SoundCloud results found for `{query}`.")
             continue
 
-        print(f"New track/result: {track['title']} - {track['url']}")
-        send_discord_alert(track)
-        seen.add(track_id)
-        new_count += 1
+        for track in reversed(results):
+            track_id = track["url"]
+
+            if track_id in seen:
+                print(f"Already seen, skipping: {track['title']} - {track['url']}")
+                continue
+            print(f"New track/result for `{query}`: {track['title']} - {track['url']}")
+            send_discord_alert(query, track)
+            seen.add(track_id)
+            total_new_count += 1
 
     save_seen_tracks(seen)
 
-    print(f"Done. New SoundCloud alerts sent: {new_count}")
+    print(f"Done. New SoundCloud alerts sent: {total_new_count}")
 
 
 if __name__ == "__main__":
