@@ -3,8 +3,12 @@ from __future__ import annotations
 import json
 import os
 import re
+
 from pathlib import Path
 from urllib.parse import quote_plus
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 
 import requests
@@ -107,12 +111,24 @@ def search_soundcloud(query: str) -> list[dict[str, str]]:
     return results
 
 
+def format_soundcloud_time(created_at: str) -> str:
+    if not created_at:
+        return "Unknown"
+
+    try:
+        utc_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        local_dt = utc_dt.astimezone(ZoneInfo("America/New_York"))
+        return local_dt.strftime("%m/%d/%y %-I:%M %p ET")
+    except Exception:
+        return created_at
+
+
 def send_discord_alert(track: dict[str, str]) -> None:
     if not DISCORD_WEBHOOK_URL:
         raise RuntimeError("Missing DISCORD_WEBHOOK_URL in .env")
 
     username = track.get("username", "Unknown uploader")
-    created_at = track.get("created_at", "Unknown date")
+    created_at = format_soundcloud_time(track.get("created_at", ""))
 
     payload = {
         "username": "SoundCloud Notifier",
