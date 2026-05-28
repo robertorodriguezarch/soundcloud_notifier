@@ -19,6 +19,8 @@ SEEN_FILE = BASE_DIR / "seen_soundcloud_tracks.json"
 
 SEARCH_QUERY = os.getenv("SOUNDCLOUD_SEARCH_QUERY", "babystaydown")
 CREATED_AT_FILTER = os.getenv("SOUNDCLOUD_CREATED_AT_FILTER", "last_hour")
+SOUNDCLOUD_CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
+SOUNDCLOUD_LIMIT = int(os.getenv("SOUNDCLOUD_LIMIT", 20))
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 
@@ -46,78 +48,81 @@ def save_seen_tracks(seen: set[str]) -> None:
 
 def search_soundcloud(query: str) -> list[dict[str, str]]:
     """
-    Public SoundCloud search scrape.
-
-    First version:
-    - searches SoundCloud web results
-    - extracts track-looking links
-    - filters links/titles containing the query
+    Search SoundCloud using the same api-v2 JSON endpoint the browser uses.
     """
 
-    url = (
-        f"https://soundcloud.com/search/sounds"
-        f"?q={quote_plus(query)}"
-        f"&filter.created_at={quote_plus(CREATED_AT_FILTER)}"
-    )
+    if not SOUNDCLOUD_CLIENT_ID:
+        raise RuntimeError("Missing SOUNDCLOUD_CLIENT_ID in .env")
 
-    print(f"Searching SoundCloud: {url}")
+    url = "https://api-v2.soundcloud.com/search/tracks"
 
-    response = requests.get(url, headers=HEADERS, timeout=30)
+    params = {
+        "q": query,
+        "filter.created_at": CREATED_AT_FILTER,
+        "facet": "genre",
+        "client_id": SOUNDCLOUD_CLIENT_ID,
+        "limit": SOUNDCLOUD_LIMIT,
+        "offset": 0,
+        "linked_partitioning": 1,
+        "app_locale": "en",
+    }
+
+    print(f"Searching SoundCloud API for query={query}, filter={CREATED_AT_FILTER}")
+
+    response = requests.get(url, headers=HEADERS, params=params, timeout=30)
     response.raise_for_status()
 
-    soup = BeautifulSoup(response.text, "html.parser")
+    data = response.json()
+    collection = data.get("collection", [])
 
     results: list[dict[str, str]] = []
-    seen_urls: set[str] = set()
 
-    for link in soup.find_all("a", href=True):
-        href = str(link["href"])
+    for track in collection:
+        title = track.get("title") or ""
+        permalink_url = track.get("permalink_url") or ""
+        created_at = track.get("created_at") or ""
+        username = ""
 
-        # Skip non-track/search/navigation links
-        if not href.startswith("/"):
+        user = track.get("user")
+        if isinstance(user, dict):
+            username = user.get("username") or ""
+
+        if not permalink_url:
             continue
 
-        if href.startswith(("/search", "/discover", "/stream", "/you", "upload")):
-            continue
+        normalized = f"{title} {permalink_url} {username}".lower()
 
-        # Track URLs usually look like /artist/track-title
-        parts = [part for part in href.split("/") if part]
-        if len(parts) != 2:
-            continue
-
-        full_url = f"https://soundcloud.com{href}"
-        title = link.get_text(" ", strip=True)
-
-        # Some links have empty text; use URL slug as fallback
-        if not title:
-            title = parts[-1].replace("-", " ")
-
-        normalized = f"{title} {href}".lower()
         if query.lower() not in normalized:
             continue
-
-        if full_url in seen_urls:
-            continue
-
-        seen_urls.add(full_url)
 
         results.append(
             {
                 "title": title,
-                "url": full_url,
+                "url": permalink_url,
+                "created_at": created_at,
+                "username": username,
             }
         )
 
-        return results
+    return results
 
 
 def send_discord_alert(track: dict[str, str]) -> None:
     if not DISCORD_WEBHOOK_URL:
         raise RuntimeError("Missing DISCORD_WEBHOOK_URL in .env")
 
+    username = track.get("username", "Unknown uploader")
+    created_at = track.get("created_at", "Unknown date")
+
     payload = {
         "username": "SoundCloud Notifier",
-        "content": f"New SoundCloud result for `{SEARCH_QUERY}`:\n{track['title']}\n{track['url']}",
+        "content": (
+            f"New SoundCloud result for `{SEARCH_QUERY}`:\n"
+            f"***{track['title']}**\n"
+            f"Uploader: {username}\n"
+            f"Created: {created_at}\n"
+            f"{track['url']}"
+        ),
     }
 
     response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=30)
@@ -128,7 +133,9 @@ def main() -> None:
     print(
         f"Config loaded: "
         f"SOUNDCLOUD_SEARCH_QUERY={SEARCH_QUERY}, "
-        f"SOUNDCLOUD_CREATED_AT_FILTER={CREATED_AT_FILTER}"
+        f"SOUNDCLOUD_CREATED_AT_FILTER={CREATED_AT_FILTER}, "
+        f"SOUNDCLOUD_LIMIT={SOUNDCLOUD_LIMIT}, "
+        f"SOUNDCLOUD_CLIENT_ID_LOADED={bool(SOUNDCLOUD_CLIENT_ID)}"
     )
     if not DISCORD_WEBHOOK_URL:
         raise RuntimeError("Missing DISCORD_WEBHOOK_URL in .env")
