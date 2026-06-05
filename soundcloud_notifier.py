@@ -2,17 +2,14 @@ from __future__ import annotations
 
 import json
 import os
-import re
 
 from pathlib import Path
-from urllib.parse import quote_plus
 
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 
 import requests
-from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 
