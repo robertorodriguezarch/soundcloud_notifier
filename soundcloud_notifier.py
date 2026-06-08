@@ -8,7 +8,6 @@ from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-
 import requests
 from dotenv import load_dotenv
 
@@ -31,7 +30,7 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64: rv:128.0) Gecko/20100101 Firefox/128.0"
+        "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
     )
 }
 
@@ -149,7 +148,7 @@ def send_discord_alert(query: str, track: dict[str, str]) -> None:
 def main() -> None:
     print(
         f"Config loaded: "
-        f"SOUNDCLOUD_SEARCH_QUERY={SEARCH_QUERIES}, "
+        f"SOUNDCLOUD_SEARCH_QUERIES={SEARCH_QUERIES}, "
         f"SOUNDCLOUD_CREATED_AT_FILTER={CREATED_AT_FILTER}, "
         f"SOUNDCLOUD_LIMIT={SOUNDCLOUD_LIMIT}, "
         f"SOUNDCLOUD_CLIENT_ID_LOADED={bool(SOUNDCLOUD_CLIENT_ID)}"
