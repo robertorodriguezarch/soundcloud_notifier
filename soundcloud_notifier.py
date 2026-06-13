@@ -133,11 +133,7 @@ def send_discord_alert(query: str, track: dict[str, str]) -> None:
     payload = {
         "username": "SoundCloud Notifier",
         "content": (
-            f"New SoundCloud result for `{query}`:\n"
-            f"**{track['title']}**\n"
-            f"Uploader:\n{username}\n"
-            f"Created:\n{created_at}\n"
-            f"{track['url']}"
+            f"Uploader: {username}\nTime uploaded: {created_at}\n{track['url']}"
         ),
     }
 
