@@ -132,9 +132,7 @@ def send_discord_alert(query: str, track: dict[str, str]) -> None:
 
     payload = {
         "username": "SoundCloud Notifier",
-        "content": (
-            f"Uploader: {username}\nTime uploaded: {created_at}\n{track['url']}"
-        ),
+        "content": (f"`{query}'", f"{track['url']}"),
     }
 
     response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=30)
