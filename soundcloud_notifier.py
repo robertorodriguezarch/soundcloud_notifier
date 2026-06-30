@@ -22,7 +22,11 @@ SEARCH_QUERIES = [
     for query in os.getenv("SOUNDCLOUD_SEARCH_QUERIES", "babystaydown").split(",")
     if query.strip()
 ]
+
 CREATED_AT_FILTER = os.getenv("SOUNDCLOUD_CREATED_AT_FILTER", "last_hour")
+SOUNDCLOUD_SC_A_ID = os.getenv("SOUNDCLOUD_SC_A_ID")
+SOUNDCLOUD_USER_ID = os.getenv("SOUNDCLOUD_USER_ID")
+SOUNDCLOUD_APP_VERSION = os.getenv("SOUNDCLOUD_APP_VERSION")
 SOUNDCLOUD_CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
 SOUNDCLOUD_LIMIT = int(os.getenv("SOUNDCLOUD_LIMIT", 20))
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
@@ -62,18 +66,28 @@ def search_soundcloud(query: str) -> list[dict[str, str]]:
 
     params = {
         "q": query,
+        "sc_a_id": SOUNDCLOUD_SC_A_ID,
         "filter.created_at": CREATED_AT_FILTER,
         "facet": "genre",
+        "user_id": SOUNDCLOUD_USER_ID,
         "client_id": SOUNDCLOUD_CLIENT_ID,
         "limit": SOUNDCLOUD_LIMIT,
         "offset": 0,
         "linked_partitioning": 1,
+        "app_version": SOUNDCLOUD_APP_VERSION,
         "app_locale": "en",
     }
 
     print(f"Searching SoundCloud API for query={query}, filter={CREATED_AT_FILTER}")
 
     response = requests.get(url, headers=HEADERS, params=params, timeout=30)
+    if response.status_code == 401:
+        raise RuntimeError(
+            "SoundCloud API returned 401 Unauthorized. "
+            "The browser client_id method may no longer work. "
+            "Update the bot to use official OAuth/client credentials."
+        )
+
     response.raise_for_status()
 
     data = response.json()
