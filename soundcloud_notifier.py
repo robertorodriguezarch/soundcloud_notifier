@@ -1,4 +1,5 @@
 from __future__ import annotations
+from playwright.sync_api import sync_playwright
 
 import json
 import os
@@ -56,71 +57,73 @@ def save_seen_tracks(seen: set[str]) -> None:
 
 def search_soundcloud(query: str) -> list[dict[str, str]]:
     """
-    Search SoundCloud using the same api-v2 JSON endpoint the browser uses.
+    Search SoundCloud using Playwright instead of tghe api-v2 client_id endpoint.
+    This opens the SoundCloud search page, waits for results, and extracts visible track links.
     """
 
-    if not SOUNDCLOUD_CLIENT_ID:
-        raise RuntimeError("Missing SOUNDCLOUD_CLIENT_ID in .env")
+    url = f"https://soundcloud.com/search/sounds?q={query}&filter.created_at={CREATED_AT_FILTER}"
 
-    url = "https://api-v2.soundcloud.com/search/tracks"
-
-    params = {
-        "q": query,
-        "sc_a_id": SOUNDCLOUD_SC_A_ID,
-        "filter.created_at": CREATED_AT_FILTER,
-        "facet": "genre",
-        "user_id": SOUNDCLOUD_USER_ID,
-        "client_id": SOUNDCLOUD_CLIENT_ID,
-        "limit": SOUNDCLOUD_LIMIT,
-        "offset": 0,
-        "linked_partitioning": 1,
-        "app_version": SOUNDCLOUD_APP_VERSION,
-        "app_locale": "en",
-    }
-
-    print(f"Searching SoundCloud API for query={query}, filter={CREATED_AT_FILTER}")
-
-    response = requests.get(url, headers=HEADERS, params=params, timeout=30)
-    if response.status_code == 401:
-        raise RuntimeError(
-            "SoundCloud API returned 401 Unauthorized. "
-            "The browser client_id method may no longer work. "
-            "Update the bot to use official OAuth/client credentials."
-        )
-
-    response.raise_for_status()
-
-    data = response.json()
-    collection = data.get("collection", [])
+    print(f"Searching SoundCloud page for query={query}, filter={CREATED_AT_FILTER}")
 
     results: list[dict[str, str]] = []
 
-    for track in collection:
-        title = track.get("title") or ""
-        permalink_url = track.get("permalink_url") or ""
-        created_at = track.get("created_at") or ""
-        username = ""
+    with sync_playwright() as p:
+        browser = p.firefox.launch(headless=True)
 
-        user = track.get("user")
-        if isinstance(user, dict):
-            username = user.get("username") or ""
+        page = browser.new_page(
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64; rv: 128.0) "
+                "Gecko/20100101 Firefox/128.0"
+            )
+        )
 
-        if not permalink_url:
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(10000)
+
+        links = page.locator("a").evaluate_all(
+            """
+            (anchors, query) => anchors
+                .map(a => ({
+                    text: a.innerText,
+                    href: a.href
+                }))
+                .filter(item =>
+                        item.href &&
+                        item.href.includes("soundcloud.com") &&
+                        item.text &&
+                        item.text.toLowerCase().includes(query.toLowerCase())
+                )
+            """,
+            query,
+        )
+
+        browser.close()
+
+    seen_urls: set[str] = set()
+
+    for item in links:
+        title = item.get("text", "").strip()
+        url = item.get("href", "").strip()
+
+        if not title or not url:
             continue
 
-        normalized = f"{title} {permalink_url} {username}".lower()
-
-        if query.lower() not in normalized:
+        if url in seen_urls:
             continue
+
+        seen_urls.add(url)
 
         results.append(
             {
                 "title": title,
-                "url": permalink_url,
-                "created_at": created_at,
-                "username": username,
+                "url": url,
+                "created_at": "",
+                "username": "SoundCloud search result",
             }
         )
+
+        if len(results) >= SOUNDCLOUD_LIMIT:
+            break
 
     return results
 
@@ -161,13 +164,8 @@ def send_discord_alert(track: dict[str, str]) -> None:
 
 
 def main() -> None:
-    print(
-        f"Config loaded: "
-        f"SOUNDCLOUD_SEARCH_QUERIES={SEARCH_QUERIES}, "
-        f"SOUNDCLOUD_CREATED_AT_FILTER={CREATED_AT_FILTER}, "
-        f"SOUNDCLOUD_LIMIT={SOUNDCLOUD_LIMIT}, "
-        f"SOUNDCLOUD_CLIENT_ID_LOADED={bool(SOUNDCLOUD_CLIENT_ID)}"
-    )
+    print(f"SEARCH_BACKEND=playwright")
+
     if not DISCORD_WEBHOOK_URL:
         raise RuntimeError("Missing DISCORD_WEBHOOK_URL in .env")
 
