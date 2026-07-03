@@ -1,5 +1,5 @@
 from __future__ import annotations
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Page, sync_playwright
 
 import json
 import os
@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
-
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -55,50 +54,45 @@ def save_seen_tracks(seen: set[str]) -> None:
     SEEN_FILE.write_text(json.dumps(sorted(seen), indent=2))
 
 
-def search_soundcloud(query: str) -> list[dict[str, str]]:
+def search_soundcloud(page: Page, query: str) -> list[dict[str, str]]:
     """
-    Search SoundCloud using Playwright instead of tghe api-v2 client_id endpoint.
-    This opens the SoundCloud search page, waits for results, and extracts visible track links.
+    Search SoundCloud using an existing Playwright page.
+
+    The browser/page is created once in main(), then reused for every query.
+    This is much faster than launching Firefox separately for every search.
     """
 
-    url = f"https://soundcloud.com/search/sounds?q={query}&filter.created_at={CREATED_AT_FILTER}"
+    search_url = (
+        f"https://soundcloud.com/search/sounds"
+        f"?q={query}"
+        f"&filter.created_at={CREATED_AT_FILTER}"
+    )
 
     print(f"Searching SoundCloud page for query={query}, filter={CREATED_AT_FILTER}")
 
-    results: list[dict[str, str]] = []
+    page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
 
-    with sync_playwright() as p:
-        browser = p.firefox.launch(headless=True)
+    # SoundCloud results are rendered by JavaScript, so give the page time to fill in.
+    page.wait_for_timeout(8000)
 
-        page = browser.new_page(
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64; rv: 128.0) "
-                "Gecko/20100101 Firefox/128.0"
+    links = page.locator("a").evaluate_all(
+        """
+        (anchors, query) => anchors
+            .map(a => ({
+                text: a.innerText,
+                href: a.href
+            }))
+            .filter(item =>
+                item.href &&
+                    item.href.includes("soundcloud.com") &&
+                    item.text &&
+                    item.text.toLowerCase().includes(query.toLowerCase())
             )
-        )
+        """,
+        query,
+    )
 
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(10000)
-
-        links = page.locator("a").evaluate_all(
-            """
-            (anchors, query) => anchors
-                .map(a => ({
-                    text: a.innerText,
-                    href: a.href
-                }))
-                .filter(item =>
-                        item.href &&
-                        item.href.includes("soundcloud.com") &&
-                        item.text &&
-                        item.text.toLowerCase().includes(query.toLowerCase())
-                )
-            """,
-            query,
-        )
-
-        browser.close()
-
+    results: list[dict[str, str]] = []
     seen_urls: set[str] = set()
 
     for item in links:
@@ -107,7 +101,6 @@ def search_soundcloud(query: str) -> list[dict[str, str]]:
 
         if not title or not url:
             continue
-
         if url in seen_urls:
             continue
 
@@ -164,7 +157,12 @@ def send_discord_alert(track: dict[str, str]) -> None:
 
 
 def main() -> None:
-    print(f"SEARCH_BACKEND=playwright")
+    print(
+        f"SEARCH_BACKEND=playwright, "
+        f"SOUNDCLOUD_SEARCH_QUERIES={SEARCH_QUERIES}, "
+        f"SOUNDCLOUD_CREATED_AT_FILTER={CREATED_AT_FILTER}, "
+        f"SOUNDCLOUD_LIMIT={SOUNDCLOUD_LIMIT}"
+    )
 
     if not DISCORD_WEBHOOK_URL:
         raise RuntimeError("Missing DISCORD_WEBHOOK_URL in .env")
@@ -172,28 +170,50 @@ def main() -> None:
     seen = load_seen_tracks()
     total_new_count = 0
 
-    for query in SEARCH_QUERIES:
-        results = search_soundcloud(query)
+    with sync_playwright() as p:
+        browser = p.firefox.launch(headless=True)
 
-        print(
-            f"Found {len(results)} matching results before seen-filtering for query `{query}`."
+        page = browser.new_page(
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) "
+                "Gecko/20100101 Firefox/128.0"
+            )
         )
 
-        if not results:
-            print(f"No matching SoundCloud results found for `{query}`.")
-            continue
+        try:
+            for query in SEARCH_QUERIES:
+                results = search_soundcloud(page, query)
 
-        for track in reversed(results):
-            track_id = track["url"]
+                print(
+                    f"Found {len(results)} matching results before seen-filtering "
+                    f"for query `{query}`."
+                )
 
-            if track_id in seen:
-                print(f"Already seen, skipping: {track['title']} - {track['url']}")
-                continue
-            print(f"New track/result for `{query}`: {track['title']} - {track['url']}")
-            # send_discord_alert(query, track)
-            send_discord_alert(track)
-            seen.add(track_id)
-            total_new_count += 1
+                if not results:
+                    print(f"No matching SoundCloud results found for `{query}`.")
+                    continue
+
+                for track in reversed(results):
+                    track_id = track["url"]
+
+                    if track_id in seen:
+                        print(
+                            f"Already seen, skipping: "
+                            f"{track['title']} - {track['url']}"
+                        )
+                        continue
+
+                    print(
+                        f"New track/result for `{query}`: "
+                        f"{track['title']} - {track['url']}"
+                    )
+
+                    send_discord_alert(query, track)
+                    seen.add(track_id)
+                    total_new_count += 1
+
+        finally:
+            browser.close()
 
     save_seen_tracks(seen)
 
