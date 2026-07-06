@@ -133,16 +133,17 @@ def format_soundcloud_time(created_at: str) -> str:
         return created_at
 
 
-def send_discord_alert(track: dict[str, str]) -> None:
+def send_discord_alert(query: str, track: dict[str, str]) -> None:
     if not DISCORD_WEBHOOK_URL:
         raise RuntimeError("Missing DISCORD_WEBHOOK_URL in .env")
 
-    # username = track.get("username", "Unknown uploader")
-    # created_at = format_soundcloud_time(track.get("created_at", ""))
-
     payload = {
         "username": "SoundCloud Notifier",
-        "content": track["url"],
+        "content": (
+            f"`{query}`:\n"
+            f"**{track['title']}**\n"
+            f"{track['url']}"
+        ),
     }
 
     response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=30)
