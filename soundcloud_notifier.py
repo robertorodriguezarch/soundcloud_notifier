@@ -1,8 +1,10 @@
 from __future__ import annotations
 from playwright.sync_api import Page, sync_playwright
+from urllib.parse import urlparse
 
 import json
 import os
+import time
 
 from pathlib import Path
 
@@ -54,6 +56,34 @@ def save_seen_tracks(seen: set[str]) -> None:
     SEEN_FILE.write_text(json.dumps(sorted(seen), indent=2))
 
 
+def is_soundcloud_track_url(url: str) -> bool:
+    parsed = urlparse(url)
+
+    if parsed.netloc not in {"soundcloud.com", "www.soundcloud.com"}:
+        return False
+
+    parts = [part for part in parsed.path.split("/") if part]
+
+    # Track URLs usually look like /artist-or-user/track-title
+    if len(parts) != 2:
+        return False
+
+    blocked_first_parts = {
+            "search",
+            "discover",
+            "charts",
+            "pages",
+            "tags",
+            "you",
+            "getstarted",
+            "company",
+    }
+
+    if parts[0] in blocked_first_parts:
+        return False
+
+    return True
+
 def search_soundcloud(page: Page, query: str) -> list[dict[str, str]]:
     """
     Search SoundCloud using an existing Playwright page.
@@ -75,51 +105,81 @@ def search_soundcloud(page: Page, query: str) -> list[dict[str, str]]:
     # SoundCloud results are rendered by JavaScript, so give the page time to fill in.
     page.wait_for_timeout(8000)
 
+    # Scroll to force more lazy-loaded search results to appear.
+    for _ in range(4):
+        page.mouse.wheel(0, 2500)
+        page.wait_for_timeout(2000)
+
     links = page.locator("a").evaluate_all(
         """
-        (anchors, query) => anchors
-            .map(a => ({
-                text: a.innerText,
-                href: a.href
-            }))
-            .filter(item =>
-                item.href &&
-                    item.href.includes("soundcloud.com") &&
-                    item.text &&
-                    item.text.toLowerCase().includes(query.toLowerCase())
-            )
-        """,
-        query,
+        anchors => anchors.map(a => ({
+        text: a.innerText || "",
+        href: a.href || ""
+        }))
+        """
     )
 
     results: list[dict[str, str]] = []
     seen_urls: set[str] = set()
+    query_lower = query.lower()
+
+    print(f"Extracted {len(links)} total anchor links for `{query}`.")
 
     for item in links:
-        title = item.get("text", "").strip()
+        raw_title = item.get("text", "").strip()
         url = item.get("href", "").strip()
 
-        if not title or not url:
+        if not url:
             continue
+
+        url_lower = url.lower()
+        title_lower = raw_title.lower()
+
+        if not is_soundcloud_track_url(url):
+            continue
+
+        if query_lower not in title_lower and query_lower not in url_lower:
+            continue
+
+        if any(
+            blocked in url_lower
+            for blocked in [
+                "/search/",
+                "/search?",
+                "/comments"
+                "/tags/",
+                "/pages/",
+                "/charts/",
+                "/discover/",
+                "/you/",
+                "help.soundcloud.com",
+            ]
+        ):
+            continue
+
+        if query_lower not in title_lower and query_lower not in url_lower:
+            continue
+
         if url in seen_urls:
             continue
 
         seen_urls.add(url)
 
+        title = raw_title or url.rstrip("/").split("/")[-1].replace("-", " ")
+
         results.append(
-            {
-                "title": title,
-                "url": url,
-                "created_at": "",
-                "username": "SoundCloud search result",
-            }
-        )
+                {
+                    "title": title,
+                    "url": url,
+                    "created_at": "",
+                    "username": "SoundCloud search result",
+                }
+            )
 
         if len(results) >= SOUNDCLOUD_LIMIT:
             break
 
     return results
-
 
 def format_soundcloud_time(created_at: str) -> str:
     if not created_at:
@@ -148,6 +208,17 @@ def send_discord_alert(query: str, track: dict[str, str]) -> None:
 
     response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=30)
 
+    if response.status_code == 429:
+        try:
+            retry_after = response.json().get("retry_after", 1)
+        except Exception:
+            retry_after = 1
+
+        print(f"Discord rate limited. Sleeping for {retry_after} seconds.")
+        time.sleep(float(retry_after) + 0.5)
+
+        response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=30)
+
     if response.status_code >= 400:
         print("Discord webhook failed.")
         print("Status:", response.status_code)
@@ -174,16 +245,19 @@ def main() -> None:
     with sync_playwright() as p:
         browser = p.firefox.launch(headless=True)
 
-        page = browser.new_page(
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) "
-                "Gecko/20100101 Firefox/128.0"
-            )
-        )
-
         try:
             for query in SEARCH_QUERIES:
-                results = search_soundcloud(page, query)
+                page = browser.new_page(
+                        user_agent=(
+                            "Mozilla/5.0 (X11; Linux x86_64; rv: 128.0) "
+                            "Gecko/20100101 Firefox/128.0"
+                        )
+                    )
+                
+                try:
+                    results = search_soundcloud(page, query)
+                finally:
+                    page.close()
 
                 print(
                     f"Found {len(results)} matching results before seen-filtering "
@@ -197,6 +271,11 @@ def main() -> None:
                 for track in reversed(results):
                     track_id = track["url"]
 
+                    print(
+                        f"Candidate result for `{query}`: "
+                        f"{track['title']} - {track['url']}"
+                    )
+
                     if track_id in seen:
                         print(
                             f"Already seen, skipping: "
@@ -206,13 +285,14 @@ def main() -> None:
 
                     print(
                         f"New track/result for `{query}`: "
-                        f"{track['title']} - {track['url']}"
+                        f"{track['title']} = {track['url']}"
                     )
 
                     send_discord_alert(query, track)
                     seen.add(track_id)
+                    save_seen_tracks(seen)
                     total_new_count += 1
-
+                    time.sleep(1)
         finally:
             browser.close()
 
