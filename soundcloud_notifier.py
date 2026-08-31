@@ -1,6 +1,6 @@
 from __future__ import annotations
 from playwright.sync_api import Page, sync_playwright
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 
 import json
 import os
@@ -69,20 +69,21 @@ def is_soundcloud_track_url(url: str) -> bool:
         return False
 
     blocked_first_parts = {
-            "search",
-            "discover",
-            "charts",
-            "pages",
-            "tags",
-            "you",
-            "getstarted",
-            "company",
+        "search",
+        "discover",
+        "charts",
+        "pages",
+        "tags",
+        "you",
+        "getstarted",
+        "company",
     }
 
     if parts[0] in blocked_first_parts:
         return False
 
     return True
+
 
 def search_soundcloud(page: Page, query: str) -> list[dict[str, str]]:
     """
@@ -92,9 +93,11 @@ def search_soundcloud(page: Page, query: str) -> list[dict[str, str]]:
     This is much faster than launching Firefox separately for every search.
     """
 
+    encoded_query = quote_plus(query)
+
     search_url = (
         f"https://soundcloud.com/search/sounds"
-        f"?q={query}"
+        f"?q={encoded_query}"
         f"&filter.created_at={CREATED_AT_FILTER}"
     )
 
@@ -110,14 +113,12 @@ def search_soundcloud(page: Page, query: str) -> list[dict[str, str]]:
         page.mouse.wheel(0, 2500)
         page.wait_for_timeout(2000)
 
-    links = page.locator("a").evaluate_all(
-        """
+    links = page.locator("a").evaluate_all("""
         anchors => anchors.map(a => ({
         text: a.innerText || "",
         href: a.href || ""
         }))
-        """
-    )
+        """)
 
     results: list[dict[str, str]] = []
     seen_urls: set[str] = set()
@@ -146,8 +147,7 @@ def search_soundcloud(page: Page, query: str) -> list[dict[str, str]]:
             for blocked in [
                 "/search/",
                 "/search?",
-                "/comments"
-                "/tags/",
+                "/comments" "/tags/",
                 "/pages/",
                 "/charts/",
                 "/discover/",
@@ -168,18 +168,19 @@ def search_soundcloud(page: Page, query: str) -> list[dict[str, str]]:
         title = raw_title or url.rstrip("/").split("/")[-1].replace("-", " ")
 
         results.append(
-                {
-                    "title": title,
-                    "url": url,
-                    "created_at": "",
-                    "username": "SoundCloud search result",
-                }
-            )
+            {
+                "title": title,
+                "url": url,
+                "created_at": "",
+                "username": "SoundCloud search result",
+            }
+        )
 
         if len(results) >= SOUNDCLOUD_LIMIT:
             break
 
     return results
+
 
 def format_soundcloud_time(created_at: str) -> str:
     if not created_at:
@@ -199,11 +200,7 @@ def send_discord_alert(query: str, track: dict[str, str]) -> None:
 
     payload = {
         "username": "SoundCloud Notifier",
-        "content": (
-            f"`{query}`:\n"
-            f"**{track['title']}**\n"
-            f"{track['url']}"
-        ),
+        "content": (f"`{query}`:\n" f"**{track['title']}**\n" f"{track['url']}"),
     }
 
     response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=30)
@@ -248,12 +245,12 @@ def main() -> None:
         try:
             for query in SEARCH_QUERIES:
                 page = browser.new_page(
-                        user_agent=(
-                            "Mozilla/5.0 (X11; Linux x86_64; rv: 128.0) "
-                            "Gecko/20100101 Firefox/128.0"
-                        )
+                    user_agent=(
+                        "Mozilla/5.0 (X11; Linux x86_64; rv: 128.0) "
+                        "Gecko/20100101 Firefox/128.0"
                     )
-                
+                )
+
                 try:
                     results = search_soundcloud(page, query)
                 finally:
