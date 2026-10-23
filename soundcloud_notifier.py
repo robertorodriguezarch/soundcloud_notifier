@@ -1,10 +1,13 @@
 from __future__ import annotations
 from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
 from urllib.parse import quote_plus, urlparse
 
 import json
 import os
 import time
+import re
 
 from pathlib import Path
 
@@ -105,20 +108,60 @@ def search_soundcloud(page: Page, query: str) -> list[dict[str, str]]:
 
     page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
 
-    # SoundCloud results are rendered by JavaScript, so give the page time to fill in.
-    page.wait_for_timeout(8000)
+    result_count = page.get_by_text(
+        re.compile(r"^Found\s+[\d,]+\s+tracks?$", re.IGNORECASE)
+    )
 
-    # Scroll to force more lazy-loaded search results to appear.
+    no_results = page.get_by_text(
+        re.compile(
+            r"Sorry we didn't find any results",
+            re.IGNORECASE,
+        )
+    )
+
+    try:
+        # Wait for either a result count or a no-results message.
+        result_count.or_(no_results).first.wait_for(
+            state="visible",
+            timeout=30000,
+        )
+    except PlaywrightTimeoutError:
+        body_text = page.locator("body").inner_text()
+
+        print(f"Unexpected SoundCloud page for `{query}`:")
+        print(body_text[:1000])
+
+        raise RuntimeError(f"SoundCloud search did not load correctly for `{query}`.")
+
+    if no_results.is_visible():
+        reported_count = 0
+    else:
+        count_text = result_count.inner_text().strip()
+
+        match = re.search(
+            r"Found\s+([\d,]+)\s+tracks?",
+            count_text,
+            re.IGNORECASE,
+        )
+
+        if not match:
+            raise RuntimeError(f"Could not parse result count: {count_text}")
+
+        reported_count = int(match.group(1).replace(",", ""))
+
+    print(f"SoundCloud reports {reported_count} tracks for `{query}`.")
+
+    # Load additional results before extracting links.
     for _ in range(4):
         page.mouse.wheel(0, 2500)
         page.wait_for_timeout(2000)
 
     links = page.locator("a").evaluate_all("""
-        anchors => anchors.map(a => ({
-        text: a.innerText || "",
-        href: a.href || ""
-        }))
-        """)
+    anchors => anchors.map(a => ({
+    text: a.innerText || "",
+    href: a.href || ""
+    }))
+    """)
 
     results: list[dict[str, str]] = []
     seen_urls: set[str] = set()
@@ -136,27 +179,11 @@ def search_soundcloud(page: Page, query: str) -> list[dict[str, str]]:
         url_lower = url.lower()
         title_lower = raw_title.lower()
 
+        # Ignore links that aren't SoundCloud track URLs.
         if not is_soundcloud_track_url(url):
             continue
 
-        if query_lower not in title_lower and query_lower not in url_lower:
-            continue
-
-        if any(
-            blocked in url_lower
-            for blocked in [
-                "/search/",
-                "/search?",
-                "/comments" "/tags/",
-                "/pages/",
-                "/charts/",
-                "/discover/",
-                "/you/",
-                "help.soundcloud.com",
-            ]
-        ):
-            continue
-
+        # Only accept tracks matching the search keyword.
         if query_lower not in title_lower and query_lower not in url_lower:
             continue
 
@@ -178,6 +205,14 @@ def search_soundcloud(page: Page, query: str) -> list[dict[str, str]]:
 
         if len(results) >= SOUNDCLOUD_LIMIT:
             break
+
+    # Validate after processing the links.
+    if reported_count > 0 and len(links) <= 15:
+        raise RuntimeError(
+            f"SoundCloud reported {reported_count} tracks for `{query}`, "
+            f"but Playwright extracted only {len(links)} page links. "
+            "Search results may not have loaded correctly."
+        )
 
     return results
 
